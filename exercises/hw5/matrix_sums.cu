@@ -16,6 +16,7 @@
 
 const size_t DSIZE = 16384;      // matrix side dimension
 const int block_size = 256;  // CUDA maximum is 1024
+const int warpSize = 32;
 // matrix row-sum kernel
 __global__ void row_sums(const float *A, float *sums, size_t ds){
 
@@ -41,6 +42,64 @@ bool validate(float *data, size_t sz){
     if (data[i] != (float)sz) {printf("results mismatch at %lu, was: %f, should be: %f\n", i, data[i], (float)sz); return false;}
     return true;
 }
+
+
+__global__ void row_sums_warp(const float *A, float *sums, size_t ds){
+     float val = 0.0f;
+     unsigned mask = 0xFFFFFFFFU;
+     int lane = threadIdx.x % warpSize;
+     int warpID = threadIdx.x / warpSize;
+     
+     int row_idx = blockIdx.x * (blockDim.x / warpSize) + warpID;
+     if (row_idx < ds){
+       for (size_t i = lane; i < ds; i += warpSize)
+         val += A[row_idx*ds + i];  // each thread in the warp loads and sums multiple elements from the row
+        __syncwarp();
+      // first level of reduction within the warp
+       for (int offset = warpSize/2; offset > 0; offset >>= 1) 
+         val += __shfl_down_sync(mask, val, offset);
+        if (lane == 0)
+          sums[row_idx] = val;  // write the final sum for the row by lane 0 of the warp
+     }
+}
+
+__global__ void row_sums_tb(const float *A, float *sums, size_t ds){
+     float val = 0.0f;
+     unsigned mask = 0xFFFFFFFFU;
+     int lane = threadIdx.x % warpSize;
+     int warpID = threadIdx.x / warpSize;
+     int row = blockIdx.x;
+     __shared__ float sdata[block_size/warpSize]; 
+
+     if(row < ds)
+     {
+          // 网格块步进循环
+          for(int offset = 0; offset < ds; offset += blockDim.x){
+            int col = offset + threadIdx.x;
+            if (col < ds)
+                val += A[row*ds + col];  
+          }
+         __syncwarp();
+
+          // warp 内归约
+          for (int offset = warpSize/2; offset > 0; offset >>= 1) 
+              val += __shfl_down_sync(mask, val, offset);
+          if (lane == 0)
+              sdata[warpID] = val;
+          __syncthreads();
+
+          // 线程块内归约
+          if (warpID == 0){
+              val = (lane < (blockDim.x/warpSize)) ? sdata[lane] : 0.0f;
+              for (int offset = warpSize/2; offset > 0; offset >>= 1) 
+                  val += __shfl_down_sync(mask, val, offset);
+              if (lane == 0)
+                  sums[row] = val;
+          }
+     }
+}
+
+
 int main(){
 
   float *h_A, *h_sums, *d_A, *d_sums;
@@ -74,6 +133,22 @@ int main(){
   cudaCheckErrors("kernel execution failure or cudaMemcpy H2D failure");
   if (!validate(h_sums, DSIZE)) return -1; 
   printf("column sums correct!\n");
+
+  cudaMemset(d_sums, 0, DSIZE*sizeof(float));
+  row_sums_warp<<<(DSIZE+(block_size / warpSize)-1)/(block_size / warpSize), block_size>>>(d_A, d_sums, DSIZE);
+  cudaCheckErrors("kernel launch failure");
+  cudaMemcpy(h_sums, d_sums, DSIZE*sizeof(float), cudaMemcpyDeviceToHost);
+  cudaCheckErrors("kernel execution failure or cudaMemcpy H2D failure");
+  if (!validate(h_sums, DSIZE)) return -1; 
+  printf("Warp-level row sums correct!\n");
+
+  cudaMemset(d_sums, 0, DSIZE*sizeof(float));
+  row_sums_tb<<<DSIZE, block_size>>>(d_A, d_sums, DSIZE);
+  cudaCheckErrors("kernel launch failure");
+  cudaMemcpy(h_sums, d_sums, DSIZE*sizeof(float), cudaMemcpyDeviceToHost);
+  cudaCheckErrors("kernel execution failure or cudaMemcpy H2D failure");
+  if (!validate(h_sums, DSIZE)) return -1; 
+  printf("Thread-block-level row sums correct!\n");
   return 0;
 }
   

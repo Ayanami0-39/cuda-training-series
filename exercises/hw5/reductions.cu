@@ -14,8 +14,8 @@
     } while (0)
 
 
-const size_t N = 8ULL*1024ULL*1024ULL;  // data size
-//const size_t N = 256*640; // data size
+const size_t N = 64*8ULL*1024ULL*1024ULL;  // data size
+// const size_t N = 256*640; // data size
 const int BLOCK_SIZE = 256;  // CUDA maximum is 1024
 // naive atomic reduction kernel
 __global__ void atomic_red(const float *gdata, float *out){
@@ -114,13 +114,15 @@ int main(){
   cudaCheckErrors("cudaMemset failure");
   //cuda processing sequence step 1 is complete
   atomic_red<<<(N+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE>>>(d_A, d_sum);
+  printf("Launched %lu blocks of %d threads\n", (N+BLOCK_SIZE-1)/BLOCK_SIZE, BLOCK_SIZE);
   cudaCheckErrors("atomic reduction kernel launch failure");
   //cuda processing sequence step 2 is complete
   // copy vector sums from device to host:
   cudaMemcpy(h_sum, d_sum, sizeof(float), cudaMemcpyDeviceToHost);
   //cuda processing sequence step 3 is complete
   cudaCheckErrors("atomic reduction kernel execution failure or cudaMemcpy H2D failure");
-  if (*h_sum != (float)N) {printf("atomic sum reduction incorrect!\n"); return -1;}
+  if (*h_sum != (float)N) {printf("atomic sum reduction incorrect!\n"); }
+  printf("Theoretical sum: %f, computed sum: %f\n", (float)N, *h_sum);
   printf("atomic sum reduction correct!\n");
   const int blocks = 640;
   cudaMemset(d_sum, 0, sizeof(float));
@@ -147,6 +149,7 @@ int main(){
   cudaCheckErrors("reduction warp shuffle kernel execution failure or cudaMemcpy H2D failure");
   if (*h_sum != (float)N) {printf("reduction warp shuffle sum incorrect!\n"); return -1;}
   printf("reduction warp shuffle sum correct!\n");
+  printf("Theoretical sum: %f, computed sum: %f\n", (float)N, *h_sum);
   return 0;
 }
   

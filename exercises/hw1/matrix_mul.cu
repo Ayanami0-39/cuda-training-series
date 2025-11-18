@@ -17,9 +17,9 @@
     } while (0)
 
 
-const int DSIZE = 4096;
-const int block_size = 16;  // CUDA maximum is 1024 *total* threads in block
-const float A_val = 1.0f;
+const int DSIZE = 8192;
+const int block_size = 32;  // CUDA maximum is 1024 *total* threads in block
+const float A_val = 3.0f;
 const float B_val = 2.0f;
 
 // matrix multiply (naive) kernel: C = A * B
@@ -31,7 +31,7 @@ __global__ void mmul(const float *A, const float *B, float *C, int ds) {
   if ((idx < ds) && (idy < ds)){
     float temp = 0;
     for (int i = 0; i < ds; i++)
-      temp += A[FIXME*ds+i] * B[i*ds+FIXME];   // dot product of row and column
+      temp += A[idy*ds+i] * B[i*ds+idx];   // dot product of row and column
     C[idy*ds+idx] = temp;
   }
 }
@@ -39,6 +39,7 @@ __global__ void mmul(const float *A, const float *B, float *C, int ds) {
 int main(){
 
   float *h_A, *h_B, *h_C, *d_A, *d_B, *d_C;
+
 
   // these are just for timing
   clock_t t0, t1, t2;
@@ -95,6 +96,23 @@ int main(){
   for (int i = 0; i < DSIZE*DSIZE; i++) if (h_C[i] != A_val*B_val*DSIZE) {printf("mismatch at index %d, was: %f, should be: %f\n", i, h_C[i], A_val*B_val*DSIZE); return -1;}
   printf("Success!\n"); 
 
+
+  t1 = clock();
+  for(int i = 0; i < 100; i++) {
+      mmul<<<grid, block>>>(d_A, d_B, d_C, DSIZE);
+      cudaStreamSynchronize(0);
+  }
+  t2 = clock();
+  double totalTime = ((double)(t2 - t1)) / CLOCKS_PER_SEC;
+  printf("Average time over 100 runs: %f seconds\n", totalTime / 100.0);
+
+  // Clean up
+  cudaFree(d_A);
+  cudaFree(d_B);
+  cudaFree(d_C);
+  delete[] h_A;
+  delete[] h_B;
+  delete[] h_C;
   return 0;
 }
   

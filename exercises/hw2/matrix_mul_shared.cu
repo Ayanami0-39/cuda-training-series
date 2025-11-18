@@ -17,7 +17,7 @@
     } while (0)
 
 
-const int DSIZE = 8192;
+const int DSIZE = 12288;
 const int block_size = 32;  // CUDA maximum is 1024 *total* threads in block
 const float A_val = 3.0f;
 const float B_val = 2.0f;
@@ -37,15 +37,17 @@ __global__ void mmul(const float *A, const float *B, float *C, int ds) {
     for (int i = 0; i < ds/block_size; i++) {
 
       // Load data into shared memory
-      As[threadIdx.y][threadIdx.x] = A[FIXME];
-      Bs[threadIdx.y][threadIdx.x] = B[FIXME];
+      // 对As来说，行号是idy，列号是i*block_size + threadIdx.x
+      // 对Bs来说，行号是i*block_size + threadIdx.y，列号是idx
+      As[threadIdx.y][threadIdx.x] = A[idy*ds + i*block_size + threadIdx.x];
+      Bs[threadIdx.y][threadIdx.x] = B[(i*block_size + threadIdx.y)*ds + idx];
 
       // Synchronize
       __syncthreads();
 
       // Keep track of the running sum
       for (int k = 0; k < block_size; k++)
-      	temp += As[FIXME][FIXME] * Bs[FIXME][FIXME]; // dot product of row and column
+      	temp += As[threadIdx.y][k] * Bs[k][threadIdx.x]; // dot product of row and column
       __syncthreads();
 
     }
@@ -114,6 +116,25 @@ int main(){
   cudaCheckErrors("kernel execution failure or cudaMemcpy H2D failure");
   for (int i = 0; i < DSIZE*DSIZE; i++) if (h_C[i] != A_val*B_val*DSIZE) {printf("mismatch at index %d, was: %f, should be: %f\n", i, h_C[i], A_val*B_val*DSIZE); return -1;}
   printf("Success!\n"); 
+
+  // Additional timing over multiple runs
+  t1 = clock();
+  for(int i = 0; i < 100; i++) {
+      mmul<<<grid, block>>>(d_A, d_B, d_C, DSIZE);
+      cudaStreamSynchronize(0);
+  }
+  t2 = clock();
+  double totalTime = ((double)(t2 - t1)) / CLOCKS_PER_SEC;
+  printf("Average time over 100 runs: %f seconds\n", totalTime / 100.0);
+
+  // Free memory
+  cudaFree(d_A);
+  cudaFree(d_B);
+  cudaFree(d_C);
+  delete[] h_A;
+  delete[] h_B;
+  delete[] h_C;
+  return 0;
   return 0;
 }
   

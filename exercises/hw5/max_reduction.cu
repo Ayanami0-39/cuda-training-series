@@ -24,16 +24,45 @@ __global__ void reduce(float *gdata, float *out, size_t n){
      size_t idx = threadIdx.x+blockDim.x*blockIdx.x;
 
      while (idx < n) {  // grid stride loop to load data
-        sdata[tid] += gdata[idx];
+        sdata[tid] = max(sdata[tid], gdata[idx]);
         idx += gridDim.x*blockDim.x;  
         }
 
      for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
         __syncthreads();
         if (tid < s)  // parallel sweep reduction
-            sdata[tid] += sdata[tid + s];
+            sdata[tid] = max(sdata[tid], sdata[tid + s]);
         }
      if (tid == 0) out[blockIdx.x] = sdata[0];
+  }
+
+  const float FLT_MIN = -3e+38F; // -infinity
+__global__ void reduce_ws(float *gdata, float *out, size_t n){
+  __shared__ float sdata[BLOCK_SIZE];
+     int tid = threadIdx.x;
+     int idx = threadIdx.x+blockDim.x*blockIdx.x;
+     float val = FLT_MIN;
+     unsigned mask = 0xFFFFFFFFU;
+     int lane = threadIdx.x % warpSize;
+     int warpID = threadIdx.x / warpSize;
+
+     while (idx < n) {  // grid stride loop to load 
+        val = max(val, gdata[idx]);
+        idx += gridDim.x*blockDim.x;  
+    }
+
+ // 1st warp-shuffle reduction
+    for (int offset = warpSize/2; offset > 0; offset >>= 1) 
+       val = max(val, __shfl_down_sync(mask, val, offset));
+    if (lane == 0) sdata[warpID] = val;
+    __syncthreads();
+  // final reduction within block
+    if (warpID == 0 && lane < (blockDim.x/warpSize)) {
+       val = sdata[lane];
+        for (int offset = warpSize/2; offset > 0; offset >>= 1) 
+            val = max(val, __shfl_down_sync(mask, val, offset));
+        if (lane == 0) out[blockIdx.x] = val;
+    }
   }
 
 int main(){
@@ -63,5 +92,19 @@ int main(){
   //cuda processing sequence step 3 is complete
   cudaCheckErrors("reduction w/atomic kernel execution failure or cudaMemcpy D2H failure");
   printf("reduction output: %f, expected sum reduction output: %f, expected max reduction output: %f\n", *h_sum, (float)((N-1)+max_val), max_val);
+
+  cudaMemcpy(d_A, h_A, N*sizeof(float), cudaMemcpyHostToDevice);
+  cudaCheckErrors("cudaMemcpy H2D failure");
+  //cuda processing sequence step 1 is complete
+  reduce_ws<<<blocks, BLOCK_SIZE>>>(d_A, d_sums, N);
+  cudaCheckErrors("warp-shuffle reduction kernel launch failure");
+  reduce_ws<<<1, BLOCK_SIZE>>>(d_sums, d_A, blocks);
+  cudaCheckErrors("warp-shuffle reduction kernel launch failure");
+  //cuda processing sequence step 2 is complete
+  // copy vector sums from device to host:
+  cudaMemcpy(h_sum, d_A, sizeof(float), cudaMemcpyDeviceToHost);
+  //cuda processing sequence step 3 is complete
+  cudaCheckErrors("warp-shuffle reduction kernel execution failure or cudaMemcpy D2H failure");
+  printf("warp-shuffle reduction output: %f, expected sum reduction output: %f, expected max reduction output: %f\n", *h_sum, (float)((N-1)+max_val), max_val);
   return 0;
 }
